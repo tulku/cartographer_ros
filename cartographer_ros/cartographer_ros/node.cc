@@ -40,6 +40,7 @@
 #include "cartographer_ros/time_conversion.h"
 #include "cartographer_ros_msgs/StatusCode.h"
 #include "cartographer_ros_msgs/StatusResponse.h"
+#include "geometry_msgs/PoseStamped.h"
 #include "glog/logging.h"
 #include "nav_msgs/Odometry.h"
 #include "ros/serialization.h"
@@ -113,6 +114,11 @@ Node::Node(
   constraint_list_publisher_ =
       node_handle_.advertise<::visualization_msgs::MarkerArray>(
           kConstraintListTopic, kLatestOnlyPublisherQueueSize);
+  if (node_options_.publish_tracked_pose) {
+    tracked_pose_publisher_ =
+        node_handle_.advertise<::geometry_msgs::PoseStamped>(
+            kTrackedPoseTopic, kLatestOnlyPublisherQueueSize);
+  }
   service_servers_.push_back(node_handle_.advertiseService(
       kSubmapQueryServiceName, &Node::HandleSubmapQuery, this));
   service_servers_.push_back(node_handle_.advertiseService(
@@ -255,6 +261,15 @@ void Node::PublishLocalTrajectoryData(const ::ros::TimerEvent& timer_event) {
         node_options_.use_pose_extrapolator
             ? ToRos(now)
             : ToRos(trajectory_data.local_slam_data->time);
+
+    // Suppress publishing if we already published a transform at this time.
+    // Due to 2020-07 changes to geometry2, tf buffer will issue warnings for
+    // repeated transforms with the same timestamp.
+    if (last_published_tf_stamps_.count(entry.first) &&
+        last_published_tf_stamps_[entry.first] == stamped_transform.header.stamp)
+      continue;
+    last_published_tf_stamps_[entry.first] = stamped_transform.header.stamp;
+
     const Rigid3d tracking_to_local_3d =
         node_options_.use_pose_extrapolator
             ? extrapolator.ExtrapolatePose(now)
@@ -271,32 +286,41 @@ void Node::PublishLocalTrajectoryData(const ::ros::TimerEvent& timer_event) {
         trajectory_data.local_to_map * tracking_to_local;
 
     if (trajectory_data.published_to_tracking != nullptr) {
-      if (trajectory_data.trajectory_options.provide_odom_frame) {
-        std::vector<geometry_msgs::TransformStamped> stamped_transforms;
+      if (node_options_.publish_to_tf) {
+        if (trajectory_data.trajectory_options.provide_odom_frame) {
+          std::vector<geometry_msgs::TransformStamped> stamped_transforms;
 
-        stamped_transform.header.frame_id = node_options_.map_frame;
-        stamped_transform.child_frame_id =
-            trajectory_data.trajectory_options.odom_frame;
-        stamped_transform.transform =
-            ToGeometryMsgTransform(trajectory_data.local_to_map);
-        stamped_transforms.push_back(stamped_transform);
+          stamped_transform.header.frame_id = node_options_.map_frame;
+          stamped_transform.child_frame_id =
+              trajectory_data.trajectory_options.odom_frame;
+          stamped_transform.transform =
+              ToGeometryMsgTransform(trajectory_data.local_to_map);
+          stamped_transforms.push_back(stamped_transform);
 
-        stamped_transform.header.frame_id =
-            trajectory_data.trajectory_options.odom_frame;
-        stamped_transform.child_frame_id =
-            trajectory_data.trajectory_options.published_frame;
-        stamped_transform.transform = ToGeometryMsgTransform(
-            tracking_to_local * (*trajectory_data.published_to_tracking));
-        stamped_transforms.push_back(stamped_transform);
+          stamped_transform.header.frame_id =
+              trajectory_data.trajectory_options.odom_frame;
+          stamped_transform.child_frame_id =
+              trajectory_data.trajectory_options.published_frame;
+          stamped_transform.transform = ToGeometryMsgTransform(
+              tracking_to_local * (*trajectory_data.published_to_tracking));
+          stamped_transforms.push_back(stamped_transform);
 
-        tf_broadcaster_.sendTransform(stamped_transforms);
-      } else {
-        stamped_transform.header.frame_id = node_options_.map_frame;
-        stamped_transform.child_frame_id =
-            trajectory_data.trajectory_options.published_frame;
-        stamped_transform.transform = ToGeometryMsgTransform(
-            tracking_to_map * (*trajectory_data.published_to_tracking));
-        tf_broadcaster_.sendTransform(stamped_transform);
+          tf_broadcaster_.sendTransform(stamped_transforms);
+        } else {
+          stamped_transform.header.frame_id = node_options_.map_frame;
+          stamped_transform.child_frame_id =
+              trajectory_data.trajectory_options.published_frame;
+          stamped_transform.transform = ToGeometryMsgTransform(
+              tracking_to_map * (*trajectory_data.published_to_tracking));
+          tf_broadcaster_.sendTransform(stamped_transform);
+        }
+      }
+      if (node_options_.publish_tracked_pose) {
+        ::geometry_msgs::PoseStamped pose_msg;
+        pose_msg.header.frame_id = node_options_.map_frame;
+        pose_msg.header.stamp = stamped_transform.header.stamp;
+        pose_msg.pose = ToGeometryMsgPose(tracking_to_map);
+        tracked_pose_publisher_.publish(pose_msg);
       }
     }
   }
