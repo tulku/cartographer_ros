@@ -44,6 +44,7 @@ DEFINE_bool(include_frozen_submaps, true,
             "Include frozen submaps in the occupancy grid.");
 DEFINE_bool(include_unfrozen_submaps, true,
             "Include unfrozen submaps in the occupancy grid.");
+DEFINE_bool(publish_only_once, false, "Only publish the occupancy grid once.");
 DEFINE_string(occupancy_grid_topic, cartographer_ros::kOccupancyGridTopic,
               "Name of the topic on which the occupancy grid is published.");
 
@@ -169,6 +170,10 @@ void Node::DrawAndPublish(const ::ros::WallTimerEvent& unused_timer_event) {
   std::unique_ptr<nav_msgs::OccupancyGrid> msg_ptr = CreateOccupancyGridMsg(
       painted_slices, resolution_, last_frame_id_, last_timestamp_);
   occupancy_grid_publisher_.publish(*msg_ptr);
+  if (FLAGS_publish_only_once) {
+    occupancy_grid_publisher_timer_.stop();
+    submap_list_subscriber_.shutdown();
+  }
 }
 
 }  // namespace
